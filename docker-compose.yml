@@ -1,0 +1,101 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    env_file:
+      - .env
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - orchestrator-net
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 60s  # Даём время на загрузку модели
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: serve
+
+  model-prewarm:
+    image: alpine/curl:latest
+    container_name: model-prewarm
+    networks:
+      - orchestrator-net
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ./scripts/prewarm.sh:/prewarm.sh
+    command: sh /prewarm.sh
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: orchestrator-postgres
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d   # автоматическое выполнение миграций при первом запуске
+    networks:
+      - orchestrator-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrator"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: orchestrator-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - orchestrator-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: orchestrator
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./config:/app/config                 # для файла статических агентов
+      - ./internal:/app/internal              # монтируем исходники для hot-reload (опционально, если нужно)
+    working_dir: /app
+    networks:
+      - orchestrator-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Для hot-reload используем air внутри контейнера (см. Dockerfile)
+    command: ["air", "-c", ".air.toml"]
+
+networks:
+  orchestrator-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  ollama_data:

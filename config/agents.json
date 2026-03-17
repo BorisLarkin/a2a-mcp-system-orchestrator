@@ -1,0 +1,16 @@
+[
+  {
+    "id": "classifier-1",
+    "name": "rubert-classifier",
+    "endpoint": "http://100.87.189.74:9001",
+    "capabilities": ["classification"],
+    "status": "online"
+  },
+  {
+    "id": "encoder-1",
+    "name": "sentence-encoder",
+    "endpoint": "http://100.87.189.74:9102",
+    "capabilities": ["embedding"],
+    "status": "online"
+  }
+]
