@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -13,8 +14,16 @@ type AgentClient struct {
 }
 
 func NewAgentClient(timeout time.Duration) *AgentClient {
+	// Увеличиваем таймаут с 10 до 30 секунд для генератора
 	return &AgentClient{
-		httpClient: &http.Client{Timeout: timeout},
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second, // было 10, стало 30
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 	}
 }
 
@@ -47,22 +56,30 @@ func (c *AgentClient) CallEmbedding(agentURL, text string) (map[string]interface
 }
 
 // универсальный метод вызова
+// Универсальный метод вызова любого агента
 func (c *AgentClient) call(url string, payload interface{}) (map[string]interface{}, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
+
+	fmt.Printf("Calling %s with payload: %s\n", url, string(data))
+
 	resp, err := c.httpClient.Post(url, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("agent returned status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("agent returned status %d: %s", resp.StatusCode, string(body))
 	}
+
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
+
 	return result, nil
 }

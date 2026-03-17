@@ -77,7 +77,7 @@ func main() {
 	}
 
 	// Клиент для агентов
-	agentClient := services.NewAgentClient(10 * time.Second)
+	agentClient := services.NewAgentClient(30 * time.Second)
 
 	// 🔥 Инициализация LLM клиента
 	llmClient := services.NewLLMClient(cfg.LLMEndpoint, cfg.LLMModel)

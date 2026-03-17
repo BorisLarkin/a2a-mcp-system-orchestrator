@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
@@ -22,13 +23,33 @@ func NewStaticClient(filePath string) (*StaticClient, error) {
 }
 
 func (c *StaticClient) GetAgents(dispatcherID string, requiredCapabilities []string) ([]Agent, error) {
-	// Фильтруем по capabilities, если нужно
+	fmt.Printf("Getting agents with required capabilities: %v\n", requiredCapabilities)
+
 	var result []Agent
+
 	for _, agent := range c.agents {
-		if agent.Status == "online" && hasCapabilities(agent.Capabilities, requiredCapabilities) {
+		fmt.Printf("Checking agent %s with capabilities: %v, status: %s\n",
+			agent.Name, agent.Capabilities, agent.Status)
+
+		if agent.Status != "online" {
+			fmt.Printf("Agent %s is offline, skipping\n", agent.Name)
+			continue
+		}
+
+		if len(requiredCapabilities) == 0 {
+			// Если нет требований, возвращаем всех online
 			result = append(result, agent)
+			fmt.Printf("Adding agent %s (no capability filter)\n", agent.Name)
+			continue
+		}
+
+		if hasCapabilities(agent.Capabilities, requiredCapabilities) {
+			result = append(result, agent)
+			fmt.Printf("Adding agent %s (matches capabilities)\n", agent.Name)
 		}
 	}
+
+	fmt.Printf("Returning %d agents\n", len(result))
 	return result, nil
 }
 

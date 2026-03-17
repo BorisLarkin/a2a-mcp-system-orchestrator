@@ -44,7 +44,7 @@ func NewOrchestratorService(dc discovery.Client, ac *AgentClient, dr *Dispatcher
 		agentClient:     ac,
 		dispatcherRepo:  dr,
 		llmClient:       llm,
-		planExecutor:    NewPlanExecutor(dc, ac),
+		planExecutor:    NewPlanExecutor(dc, ac, llm),
 	}
 }
 
@@ -259,7 +259,7 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 	return response, nil
 }
 
-// createPlan запрашивает план у LLM
+// createPlan запрашивает план у LLM с жёсткими инструкциями по формату
 func (s *OrchestratorService) createPlan(text string, config map[string]interface{}, agents []discovery.Agent) (string, error) {
 	// Формируем список доступных агентов для промпта
 	agentDescriptions := []string{}
@@ -268,33 +268,43 @@ func (s *OrchestratorService) createPlan(text string, config map[string]interfac
 	}
 	agentsText := strings.Join(agentDescriptions, "\n")
 
-	// Формируем системный промпт
+	// Формируем системный промпт с ЖЁСТКИМ требованием формата
 	systemPrompt := `Ты — оркестратор системы поддержки. Твоя задача — спланировать обработку обращения пользователя.
 
 Доступные агенты:
 %s
 
-Правила планирования:
-1. Всегда начинай с классификации (classifier)
-2. Если нужно найти решение в базе знаний — используй researcher
-3. Для поиска похожих случаев нужны эмбеддинги (encoder)
-4. Завершай генерацией ответа (generator)
+ВАЖНО: Твой ответ должен быть ТОЛЬКО списком шагов в формате:
+"X. агент → действие"
 
-Формат ответа:
-Каждый шаг с новой строки в формате: "X. агент → действие"
-Пример:
+ПРИМЕРЫ ПРАВИЛЬНЫХ ОТВЕТОВ:
 1. classifier → category
 2. researcher → search
 3. generator → response
 
-Не добавляй лишнего текста, только план.`
+1. classifier → problem_type
+2. encoder → embedding
+3. generator → answer
+
+ЗАПРЕЩЕНО:
+- Использовать if/else
+- Писать объяснения
+- Добавлять скобки или специальные символы
+- Менять формат "номер. агент → действие"
+
+Правила выбора агентов:
+- classifier - для определения категории проблемы
+- encoder - для создания эмбеддингов (если нужен поиск)
+- researcher - для поиска решений в базе знаний
+- generator - для генерации финального ответа
+
+Составь план из 2-3 шагов. Только формат "X. агент → действие", ничего лишнего.`
 
 	systemPrompt = fmt.Sprintf(systemPrompt, agentsText)
 
-	userPrompt := fmt.Sprintf(`Конфигурация компании: %v
-Обращение пользователя: "%s"
+	userPrompt := fmt.Sprintf(`Обращение пользователя: "%s"
 
-Составь план обработки из 2-3 шагов.`, config, text)
+Составь план обработки.`, text)
 
 	return s.llmClient.Generate(systemPrompt, userPrompt)
 }
