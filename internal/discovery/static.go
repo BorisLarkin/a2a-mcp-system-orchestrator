@@ -57,7 +57,14 @@ func hasCapabilities(available, required []string) bool {
 	if len(required) == 0 {
 		return true
 	}
-	// упрощённо: считаем что все required есть в available
-	// можно реализовать пересечение множеств
+	availSet := make(map[string]bool, len(available))
+	for _, c := range available {
+		availSet[c] = true
+	}
+	for _, r := range required {
+		if !availSet[r] {
+			return false
+		}
+	}
 	return true
 }

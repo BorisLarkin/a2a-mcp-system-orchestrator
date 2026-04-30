@@ -11,12 +11,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 )
 
 type OrchestratorService struct {
 	discoveryClient discovery.Client
 	agentClient     *AgentClient
+	a2aClient       *A2AClient
 	dispatcherRepo  *DispatcherRepository
+	agentRepo       *AgentRepository
+	ticketRepo      *TicketRepository
 	llmClient       *LLMClient
 	planExecutor    *PlanExecutor
 }
@@ -38,13 +42,24 @@ type ProcessTicketResponse struct {
 	ExecutionLog   []string               `json:"execution_log,omitempty"`
 }
 
-func NewOrchestratorService(dc discovery.Client, ac *AgentClient, dr *DispatcherRepository, llm *LLMClient) *OrchestratorService {
+func NewOrchestratorService(
+	dc discovery.Client,
+	ac *AgentClient,
+	a2a *A2AClient,
+	dr *DispatcherRepository,
+	ar *AgentRepository,
+	tr *TicketRepository,
+	llm *LLMClient,
+) *OrchestratorService {
 	return &OrchestratorService{
 		discoveryClient: dc,
 		agentClient:     ac,
+		a2aClient:       a2a,
 		dispatcherRepo:  dr,
+		agentRepo:       ar,
+		ticketRepo:      tr,
 		llmClient:       llm,
-		planExecutor:    NewPlanExecutor(dc, ac, llm),
+		planExecutor:    NewPlanExecutor(dc, ac, a2a, llm),
 	}
 }
 
@@ -255,50 +270,87 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 		ExecutionLog:   executionLog,
 	}
 
+	ticketID, _ := uuid.Parse(response.TicketID)
+	dispID, _ := uuid.Parse(req.DispatcherID)
+	ticket := &db.Ticket{
+		ID:               ticketID,
+		DispatcherID:     &dispID,
+		Text:             req.Text,
+		Status:           response.Status,
+		Plan:             &response.Plan,
+		Confidence:       &confidence,
+		SuggestedTeam:    &team,
+		ProcessingTimeMs: nil,
+	}
+	if classification != nil {
+		classJSON, _ := json.Marshal(classification)
+		ticket.Classification = datatypes.JSON(classJSON)
+	}
+	if response.Embedding != nil {
+		embJSON, _ := json.Marshal(response.Embedding)
+		ticket.Embedding = datatypes.JSON(embJSON)
+	}
+	if finalResponse != "" {
+		ticket.FinalResponse = &finalResponse
+	}
+	if len(executionLog) > 0 {
+		logJSON, _ := json.Marshal(executionLog)
+		ticket.ExecutionLog = datatypes.JSON(logJSON)
+	}
+	if err := s.ticketRepo.Create(ticket); err != nil {
+		log.Printf("Warning: failed to save ticket: %v", err)
+	} else {
+		log.Printf("Ticket saved: %s", ticket.ID)
+	}
 	log.Printf("✅ Ticket processed successfully")
 	return response, nil
 }
 
-// createPlan запрашивает план у LLM с жёсткими инструкциями по формату
 func (s *OrchestratorService) createPlan(text string, config map[string]interface{}, agents []discovery.Agent) (string, error) {
-	// Формируем список доступных агентов для промпта
 	agentDescriptions := []string{}
 	for _, a := range agents {
-		agentDescriptions = append(agentDescriptions, fmt.Sprintf("- %s: capabilities: %v", a.Name, a.Capabilities))
+		skills := []string{}
+		for _, sk := range a.Skills {
+			skills = append(skills, sk.ID)
+		}
+		agentDescriptions = append(agentDescriptions,
+			fmt.Sprintf("- %s: capabilities: %v, skills: %v", a.Name, a.Capabilities, skills))
 	}
 	agentsText := strings.Join(agentDescriptions, "\n")
 
-	// Формируем системный промпт с ЖЁСТКИМ требованием формата
 	systemPrompt := `Ты — оркестратор системы поддержки. Твоя задача — спланировать обработку обращения пользователя.
 
 Доступные агенты:
 %s
 
 ВАЖНО: Твой ответ должен быть ТОЛЬКО списком шагов в формате:
-"X. агент → действие"
+"X. агент:навык → действие"
 
 ПРИМЕРЫ ПРАВИЛЬНЫХ ОТВЕТОВ:
-1. classifier → category
-2. researcher → search
-3. generator → response
+1. classifier:classify → problem_type
+2. researcher:search → solutions
+3. generator:generate_response → answer
 
-1. classifier → problem_type
-2. encoder → embedding
-3. generator → answer
+1. classifier:classify → category
+2. encoder:embed → embedding
+3. generator:generate_response → response
 
 ЗАПРЕЩЕНО:
 - Использовать if/else
 - Писать объяснения
 - Добавлять скобки или специальные символы
-- Менять формат "номер. агент → действие"
+- Менять формат "номер. агент:навык → действие"
+- Писать агента без навыка (например "1. classifier → category" — НЕЛЬЗЯ)
 
 Правила выбора агентов:
-- classifier - для определения категории проблемы
-- encoder - для создания эмбеддингов (если нужен поиск)
-- researcher - для поиска решений в базе знаний
-- generator - для генерации финального ответа
+- classifier:classify - для определения категории проблемы
+- encoder:embed - для создания эмбеддингов (если нужен поиск)
+- researcher:search - для поиска решений в базе знаний
+- generator:generate_response - для генерации финального ответа
 
-Составь план из 2-3 шагов. Только формат "X. агент → действие", ничего лишнего.`
+Для финального ответа ВСЕГДА используй generator:generate_response.
+
+Составь план из 2-3 шагов. Только формат "X. агент:навык → действие", ничего лишнего.`
 
 	systemPrompt = fmt.Sprintf(systemPrompt, agentsText)
 
@@ -309,11 +361,10 @@ func (s *OrchestratorService) createPlan(text string, config map[string]interfac
 	return s.llmClient.Generate(systemPrompt, userPrompt)
 }
 
-// defaultPlan возвращает план по умолчанию
 func (s *OrchestratorService) defaultPlan() string {
-	return `1. classifier → category
-2. encoder → embedding
-3. generator → response`
+	return `1. classifier:classify → category
+2. researcher:search → solutions
+3. generator:generate_response → answer`
 }
 
 // fallbackProcess используется когда план не сработал

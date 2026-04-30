@@ -4,14 +4,30 @@
     "name": "rubert-classifier",
     "endpoint": "http://100.87.189.74:9001",
     "capabilities": ["classification"],
-    "status": "online"
+    "status": "online",
+    "skills": [
+      {
+        "id": "classify",
+        "description": "Classify user request into problem category with confidence score"
+      },
+      {
+        "id": "extract_entities",
+        "description": "Extract named entities from text"
+      }
+    ]
   },
   {
     "id": "encoder-1",
     "name": "sentence-encoder",
     "endpoint": "http://100.87.189.74:9102",
     "capabilities": ["embedding"],
-    "status": "online"
+    "status": "online",
+    "skills": [
+      {
+        "id": "embed",
+        "description": "Create vector embedding from text for similarity search"
+      }
+    ]
   },
   {
     "id": "generator-1",
@@ -19,9 +35,36 @@
     "endpoint": "http://100.87.189.74:9003",
     "capabilities": ["generation"],
     "status": "online",
+    "skills": [
+      {
+        "id": "generate_response",
+        "description": "Generate final answer based on classification and solutions"
+      },
+      {
+        "id": "format_response",
+        "description": "Format and adjust tone of existing answer"
+      }
+    ],
     "metadata": {
       "model": "llama3.2",
       "type": "llm"
     }
+  },
+  {
+    "id": "researcher-1",
+    "name": "researcher",
+    "endpoint": "http://100.87.189.74:9002",
+    "capabilities": ["search"],
+    "status": "online",
+    "skills": [
+      {
+        "id": "search",
+        "description": "Search knowledge base and internet for solutions"
+      },
+      {
+        "id": "search_knowledge_base",
+        "description": "Search only local knowledge base"
+      }
+    ]
   }
 ]

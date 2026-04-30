@@ -10,36 +10,41 @@ import (
 type PlanExecutor struct {
 	discoveryClient discovery.Client
 	agentClient     *AgentClient
-	llmClient       *LLMClient // Оставляем как fallback
+	a2aClient       *A2AClient
+	llmClient       *LLMClient
 }
 
 type PlanStep struct {
 	AgentType string
+	SkillID   string
 	Action    string
 	Input     map[string]interface{}
 	Output    map[string]interface{}
 }
 
-func NewPlanExecutor(dc discovery.Client, ac *AgentClient, llm *LLMClient) *PlanExecutor {
+func NewPlanExecutor(dc discovery.Client, ac *AgentClient, a2a *A2AClient, llm *LLMClient) *PlanExecutor {
 	return &PlanExecutor{
 		discoveryClient: dc,
 		agentClient:     ac,
+		a2aClient:       a2a,
 		llmClient:       llm,
 	}
 }
 
 // ParsePlan разбирает текст плана от LLM в структурированные шаги
+// Поддерживает форматы:
+//
+//	"1. agent_type:skill_id → action"
+//	"1. agent_type → action" (skill_id = action)
 func (e *PlanExecutor) ParsePlan(planText string) ([]PlanStep, error) {
 	var steps []PlanStep
 
-	// Очищаем текст от лишних символов
 	planText = strings.TrimSpace(planText)
-
-	// Разбиваем на строки
 	lines := strings.Split(planText, "\n")
 
-	// Улучшенное регулярное выражение - более гибкое
-	stepRegex := regexp.MustCompile(`(?i)^\s*(\d+)[.)]\s*(\w+)\s*[→-]>?\s*(\w+)`)
+	// Используем (.+) вместо (\w+) для поддержки кириллицы в действиях
+	stepRegexWithSkill := regexp.MustCompile(`(?i)^\s*(\d+)[.)]\s*(\w+):(\w+)\s*[→-]>?\s*(.+)`)
+	stepRegexSimple := regexp.MustCompile(`(?i)^\s*(\d+)[.)]\s*(\w+)\s*[→-]>?\s*(.+)`)
 
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -47,18 +52,37 @@ func (e *PlanExecutor) ParsePlan(planText string) ([]PlanStep, error) {
 			continue
 		}
 
-		matches := stepRegex.FindStringSubmatch(line)
-		if len(matches) == 4 {
+		// Пробуем с явным skill_id
+		matches := stepRegexWithSkill.FindStringSubmatch(line)
+		if len(matches) == 5 {
+			skillID := strings.ToLower(matches[3])
 			steps = append(steps, PlanStep{
-				AgentType: strings.ToLower(matches[2]), // нормализуем в нижний регистр
-				Action:    strings.ToLower(matches[3]),
+				AgentType: strings.ToLower(matches[2]),
+				SkillID:   skillID,
+				Action:    strings.TrimSpace(matches[4]),
 				Input:     make(map[string]interface{}),
 			})
-			fmt.Printf("Parsed step: %s → %s\n", matches[2], matches[3])
-		} else {
-			// Логируем непонятные строки для отладки
-			fmt.Printf("Skipping unparseable line: %s\n", line)
+			fmt.Printf("Parsed step (with skill): %s:%s → %s\n", matches[2], matches[3], strings.TrimSpace(matches[4]))
+			continue
 		}
+
+		// Пробуем без skill_id
+		matches = stepRegexSimple.FindStringSubmatch(line)
+		if len(matches) == 4 {
+			agentType := strings.ToLower(matches[2])
+			action := strings.TrimSpace(matches[3])
+			skillID := getDefaultSkillID(agentType, action)
+			steps = append(steps, PlanStep{
+				AgentType: agentType,
+				SkillID:   skillID,
+				Action:    action,
+				Input:     make(map[string]interface{}),
+			})
+			fmt.Printf("Parsed step (simple): %s → %s (skill: %s)\n", agentType, action, skillID)
+			continue
+		}
+
+		fmt.Printf("Skipping unparseable line: %s\n", line)
 	}
 
 	if len(steps) == 0 {
@@ -66,6 +90,20 @@ func (e *PlanExecutor) ParsePlan(planText string) ([]PlanStep, error) {
 	}
 
 	return steps, nil
+}
+
+// getDefaultSkillID возвращает стандартный skill_id для типа агента
+func getDefaultSkillID(agentType, action string) string {
+	defaults := map[string]string{
+		"classifier": "classify",
+		"encoder":    "embed",
+		"researcher": "search",
+		"generator":  "generate_response",
+	}
+	if skillID, ok := defaults[agentType]; ok {
+		return skillID
+	}
+	return action
 }
 
 // ExecutePlan выполняет последовательность шагов
@@ -80,11 +118,10 @@ func (e *PlanExecutor) ExecutePlan(steps []PlanStep, initialText string, config 
 	stepResults := context["step_results"].(map[string]interface{})
 
 	for i, step := range steps {
-		stepLog := fmt.Sprintf("Executing step %d: %s → %s", i+1, step.AgentType, step.Action)
+		stepLog := fmt.Sprintf("Executing step %d: %s:%s → %s", i+1, step.AgentType, step.SkillID, step.Action)
 		fmt.Println(stepLog)
 		context["execution_log"] = append(context["execution_log"].([]string), stepLog)
 
-		// Находим агента по типу
 		agent, err := e.findAgentByType(step.AgentType)
 		if err != nil {
 			errorLog := fmt.Sprintf("Step %d failed: %v", i+1, err)
@@ -92,7 +129,6 @@ func (e *PlanExecutor) ExecutePlan(steps []PlanStep, initialText string, config 
 			continue
 		}
 
-		// Вызываем агента
 		result, err := e.callAgent(agent, step, context)
 		if err != nil {
 			errorLog := fmt.Sprintf("Step %d failed: %v", i+1, err)
@@ -100,7 +136,6 @@ func (e *PlanExecutor) ExecutePlan(steps []PlanStep, initialText string, config 
 			continue
 		}
 
-		// Сохраняем результат
 		resultKey := fmt.Sprintf("%s_result", step.AgentType)
 		stepResults[resultKey] = result
 		stepResults[fmt.Sprintf("step_%d_result", i+1)] = result
@@ -108,14 +143,11 @@ func (e *PlanExecutor) ExecutePlan(steps []PlanStep, initialText string, config 
 		successLog := fmt.Sprintf("Step %d completed successfully", i+1)
 		context["execution_log"] = append(context["execution_log"].([]string), successLog)
 
-		// Если это генератор, сохраняем финальный ответ отдельно
 		if step.AgentType == "generator" {
 			if response, ok := result["response"].(string); ok {
 				context["final_response"] = response
 			} else if text, ok := result["text"].(string); ok {
 				context["final_response"] = text
-			} else if response, ok := result["generated_text"].(string); ok {
-				context["final_response"] = response
 			}
 		}
 	}
@@ -123,60 +155,56 @@ func (e *PlanExecutor) ExecutePlan(steps []PlanStep, initialText string, config 
 	return context, nil
 }
 
-// УНИВЕРСАЛЬНЫЙ callAgent - теперь всё через agentClient
+// callAgent — универсальный вызов агента через A2A с fallback на старый HTTP
 func (e *PlanExecutor) callAgent(agent *discovery.Agent, step PlanStep, context map[string]interface{}) (map[string]interface{}, error) {
 	text, _ := context["original_text"].(string)
 	config, _ := context["config"].(map[string]interface{})
 
+	// Пробуем A2A для всех типов агентов
+	fmt.Printf("A2A → Calling %s:%s at %s\n", step.AgentType, step.SkillID, agent.Endpoint)
+
+	var payload map[string]interface{}
+
 	switch step.AgentType {
 	case "classifier":
-		// Специализированный вызов для классификатора
-		payload := map[string]interface{}{
+		payload = map[string]interface{}{
 			"text": text,
 		}
-		return e.agentClient.call(agent.Endpoint+"/classify", payload)
 
 	case "encoder":
-		// Специализированный вызов для энкодера
-		payload := map[string]interface{}{
+		payload = map[string]interface{}{
 			"texts": []string{text},
 		}
-		return e.agentClient.call(agent.Endpoint+"/embed", payload)
 
 	case "researcher":
-		// Заглушка для researcher
-		return map[string]interface{}{
-			"results": []map[string]interface{}{
-				{"title": "Решение 1", "content": "Перезагрузите роутер", "relevance": 0.95},
-				{"title": "Решение 2", "content": "Проверьте кабели", "relevance": 0.85},
-			},
-			"source": "knowledge_base",
-		}, nil
+		category := ""
+		if cls, ok := context["step_results"].(map[string]interface{})["classifier_result"]; ok {
+			if cmap, ok := cls.(map[string]interface{}); ok {
+				if cat, ok := cmap["category"].(string); ok {
+					category = cat
+				}
+			}
+		}
+		payload = map[string]interface{}{
+			"query":    text,
+			"category": category,
+		}
 
 	case "generator":
-		fmt.Printf("🎯 Generator agent endpoint: %s\n", agent.Endpoint)
-		fmt.Printf("🎯 Generator agent name: %s\n", agent.Name)
-
-		// Собираем контекст из предыдущих шагов
 		stepResults := context["step_results"].(map[string]interface{})
 
-		// Получаем результаты классификации
-		var classification map[string]interface{}
 		var category string
 		if cls, ok := stepResults["classifier_result"]; ok {
-			classification = cls.(map[string]interface{})
-			// Пробуем получить категорию из разных полей
-			if cat, ok := classification["predicted_class"].(string); ok {
-				category = cat
-			} else if cat, ok := classification["category"].(string); ok {
-				category = cat
+			if classification, ok := cls.(map[string]interface{}); ok {
+				if cat, ok := classification["predicted_class"].(string); ok {
+					category = cat
+				} else if cat, ok := classification["category"].(string); ok {
+					category = cat
+				}
 			}
 		}
 
-		// Получаем результаты исследования
 		solutions := make([]map[string]interface{}, 0)
-
-		// Получаем результаты исследования, если они есть
 		if res, ok := stepResults["researcher_result"]; ok {
 			if research, ok := res.(map[string]interface{}); ok {
 				if results, ok := research["results"].([]interface{}); ok {
@@ -189,43 +217,61 @@ func (e *PlanExecutor) callAgent(agent *discovery.Agent, step PlanStep, context 
 			}
 		}
 
-		// Определяем стиль
 		style := "friendly"
 		if s, ok := config["communication_style"].(string); ok {
 			style = s
 		}
 
-		// Формируем промпт
-		prompt := e.buildGeneratorPrompt(text, classification, solutions, config)
+		prompt := e.buildGeneratorPrompt(text, nil, solutions, config)
 
-		// 👇 ПРАВИЛЬНЫЙ payload для генератора
-		payload := map[string]interface{}{
+		payload = map[string]interface{}{
 			"query":     text,
 			"category":  category,
 			"solutions": solutions,
 			"style":     style,
-			"context":   prompt, // Можно отправить сформированный промпт как контекст
+			"context":   prompt,
 			"language":  "ru",
 		}
 
-		fmt.Printf("📦 Sending payload to generator: %+v\n", payload)
-
-		// Пробуем вызвать генератор по его эндпоинту
-		var lastErr error
-		result, err := e.agentClient.call(agent.Endpoint+"/v1/generate", payload)
-		if err == nil {
-			fmt.Printf("✅ Generator called successfully at %s\n", agent.Endpoint)
-			return result, nil
-		}
-		lastErr = err
-		fmt.Printf("❌ Failed at %s: %v\n", agent.Endpoint, err)
-
-		// Если все попытки провалились, используем fallback
-		fmt.Printf("All generator endpoints failed, using LLM fallback: %v\n", lastErr)
-		return e.fallbackGenerator(prompt)
-
 	default:
 		return nil, fmt.Errorf("unsupported agent type: %s", step.AgentType)
+	}
+
+	// Основной вызов через A2A
+	a2aResp, err := e.a2aClient.SendTask(agent.Endpoint, step.SkillID, payload)
+	if err != nil {
+		fmt.Printf("❌ A2A call failed for %s: %v, trying old-style fallback...\n", step.AgentType, err)
+		return e.fallbackCall(agent, step, text, config, payload)
+	}
+
+	fmt.Printf("✅ A2A %s response: task_id=%s, status=%s\n", step.AgentType, a2aResp.TaskID, a2aResp.Status)
+	return a2aResp.Output, nil
+}
+
+// fallbackCall — старый способ вызова (если A2A не сработал)
+func (e *PlanExecutor) fallbackCall(agent *discovery.Agent, step PlanStep, text string, config map[string]interface{}, a2aPayload map[string]interface{}) (map[string]interface{}, error) {
+	switch step.AgentType {
+	case "classifier":
+		return e.agentClient.CallClassification(agent.Endpoint, text)
+	case "encoder":
+		return e.agentClient.CallEmbedding(agent.Endpoint, text)
+	case "researcher":
+		return map[string]interface{}{
+			"results": []map[string]interface{}{
+				{"title": "Решение 1", "content": "Перезагрузите роутер", "relevance": 0.95},
+				{"title": "Решение 2", "content": "Проверьте кабели", "relevance": 0.85},
+			},
+			"source": "knowledge_base",
+		}, nil
+	case "generator":
+		oldResult, oldErr := e.agentClient.call(agent.Endpoint+"/v1/generate", a2aPayload)
+		if oldErr != nil {
+			prompt := e.buildGeneratorPrompt(text, nil, nil, config)
+			return e.fallbackGenerator(prompt)
+		}
+		return oldResult, nil
+	default:
+		return nil, fmt.Errorf("no fallback for agent type: %s", step.AgentType)
 	}
 }
 
@@ -235,15 +281,12 @@ func (e *PlanExecutor) buildGeneratorPrompt(text string, classification map[stri
 
 	builder.WriteString("Ты — агент поддержки, который помогает пользователям.\n\n")
 
-	// Добавляем контекст компании
 	if companyContext, ok := config["company_context"].(string); ok && companyContext != "" {
 		builder.WriteString(fmt.Sprintf("Контекст компании: %s\n\n", companyContext))
 	}
 
-	// Добавляем обращение пользователя
 	builder.WriteString(fmt.Sprintf("Обращение пользователя: \"%s\"\n\n", text))
 
-	// Добавляем результаты классификации
 	if classification != nil {
 		builder.WriteString("Результаты классификации:\n")
 		if cat, ok := classification["predicted_class"].(string); ok && cat != "" {
@@ -255,20 +298,15 @@ func (e *PlanExecutor) buildGeneratorPrompt(text string, classification map[stri
 		if conf, ok := classification["confidence"].(float64); ok {
 			builder.WriteString(fmt.Sprintf("- Уверенность: %.0f%%\n", conf*100))
 		}
-		if entities, ok := classification["entities"].([]interface{}); ok && len(entities) > 0 {
-			builder.WriteString(fmt.Sprintf("- Сущности: %v\n", entities))
-		}
 		builder.WriteString("\n")
 	}
 
-	// Добавляем результаты поиска
 	if len(solutions) > 0 {
 		builder.WriteString("Найденные решения в базе знаний:\n")
 		for i, sol := range solutions {
 			title, _ := sol["title"].(string)
 			content, _ := sol["content"].(string)
 			relevance, _ := sol["relevance"].(float64)
-
 			builder.WriteString(fmt.Sprintf("%d. %s (релевантность: %.2f)\n", i+1, title, relevance))
 			if content != "" {
 				builder.WriteString(fmt.Sprintf("   %s\n", content))
@@ -277,7 +315,6 @@ func (e *PlanExecutor) buildGeneratorPrompt(text string, classification map[stri
 		builder.WriteString("\n")
 	}
 
-	// Инструкция по генерации ответа
 	builder.WriteString(`Сгенерируй ответ пользователю на русском языке, следуя правилам:
 1. Ответ должен быть вежливым и helpful
 2. Используй найденные решения, если они релевантны
@@ -304,7 +341,6 @@ func (e *PlanExecutor) fallbackGenerator(prompt string) (map[string]interface{},
 		}
 	}
 
-	// Абсолютный fallback
 	return map[string]interface{}{
 		"response": "Спасибо за обращение. Мы получили ваш запрос и передали его в отдел поддержки.",
 		"text":     "Спасибо за обращение. Мы получили ваш запрос и передали его в отдел поддержки.",
@@ -336,34 +372,32 @@ func (e *PlanExecutor) findAgentByType(agentType string) (*discovery.Agent, erro
 		return nil, fmt.Errorf("no agent found for capability: %s", capability)
 	}
 
-	// Логируем всех найденных агентов
 	for _, a := range agents {
 		fmt.Printf("📋 Found agent: %s (ID: %s, Endpoint: %s, Caps: %v)\n",
 			a.Name, a.ID, a.Endpoint, a.Capabilities)
 	}
 
-	// Выбираем подходящего агента по имени или ID
 	var selectedAgent *discovery.Agent
 
 	for i, a := range agents {
-		// Для генератора выбираем по имени
 		if agentType == "generator" && (strings.Contains(a.Name, "generator") || strings.Contains(a.Name, "llm")) {
 			selectedAgent = &agents[i]
 			break
 		}
-		// Для классификатора
 		if agentType == "classifier" && strings.Contains(a.Name, "classifier") {
 			selectedAgent = &agents[i]
 			break
 		}
-		// Для энкодера
 		if agentType == "encoder" && strings.Contains(a.Name, "encoder") {
+			selectedAgent = &agents[i]
+			break
+		}
+		if agentType == "researcher" && strings.Contains(a.Name, "researcher") {
 			selectedAgent = &agents[i]
 			break
 		}
 	}
 
-	// Если не нашли по имени, берём первого
 	if selectedAgent == nil {
 		selectedAgent = &agents[0]
 		fmt.Printf("⚠️ No specific agent found for type %s, using first: %s\n",
