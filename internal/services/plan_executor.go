@@ -210,6 +210,25 @@ func (e *PlanExecutor) callAgent(agent *discovery.Agent, step PlanStep, context 
 				if results, ok := research["results"].([]interface{}); ok {
 					for _, r := range results {
 						if sol, ok := r.(map[string]interface{}); ok {
+							// Нормализация: если нет title, создаём из id или content
+							if _, hasTitle := sol["title"]; !hasTitle {
+								if id, ok := sol["id"].(string); ok {
+									sol["title"] = id
+								} else if content, ok := sol["content"].(string); ok {
+									// Обрезаем content для title
+									if len(content) > 50 {
+										sol["title"] = content[:50] + "..."
+									} else {
+										sol["title"] = content
+									}
+								} else {
+									sol["title"] = "Решение"
+								}
+							}
+							// Нормализация: если нет source, ставим knowledge_base
+							if _, hasSource := sol["source"]; !hasSource {
+								sol["source"] = "knowledge_base"
+							}
 							solutions = append(solutions, sol)
 						}
 					}

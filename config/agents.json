@@ -1,7 +1,7 @@
 [
   {
     "id": "classifier-1",
-    "name": "rubert-classifier",
+    "name": "llm-classifier-agent",
     "endpoint": "http://100.87.189.74:9001",
     "capabilities": ["classification"],
     "status": "online",
