@@ -138,6 +138,7 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 	}
 
 	// Сохраняем результаты шагов для ответа
+	// Сохраняем результаты шагов для ответа
 	if ctx, ok := executionContext["step_results"].(map[string]interface{}); ok {
 		stepResults = ctx
 	}
@@ -149,81 +150,53 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 		executionLog = append(executionLog, fmt.Sprintf("Step '%s' result: %v", stepName, result))
 	}
 
-	// Извлекаем результаты с правильной обработкой confidence
+	// --- Schema-driven извлечение данных ---
 	var classification map[string]interface{}
-	var embedding []float64
 	var finalResponse string
-	var predictedClass string
 	var confidence float64
+	var predictedClass string
 
-	// Получаем classification из stepResults
-	if cls, ok := stepResults["classifier_result"].(map[string]interface{}); ok {
-		classification = cls
-
-		// Пробуем разные возможные поля для класса
-		if pc, ok := cls["predicted_class"].(string); ok {
-			predictedClass = pc
-		} else if pc, ok := cls["category"].(string); ok {
-			predictedClass = pc
-			// Нормализуем поле
-			cls["predicted_class"] = pc
-		}
-
-		// Пробуем разные возможные поля для confidence
-		if conf, ok := cls["confidence"].(float64); ok {
-			confidence = conf
-		} else if conf, ok := cls["score"].(float64); ok {
-			confidence = conf
-			cls["confidence"] = conf
-		} else if scores, ok := cls["scores"].(map[string]interface{}); ok {
-			// Если есть scores, берём максимальный
-			var maxScore float64
-			for _, v := range scores {
-				if score, ok := v.(float64); ok && score > maxScore {
-					maxScore = score
+	// Ищем confidence в результатах всех шагов, используя Agent Card'ы
+	for _, agent := range allAgents {
+		agentType := agentToAgentType(agent)
+		if result, ok := stepResults[agentType+"_result"]; ok {
+			if resultMap, ok := result.(map[string]interface{}); ok {
+				// Копируем результат классификатора как classification
+				if agentType == "classifier" {
+					classification = resultMap
 				}
-			}
-			if maxScore > 0 {
-				confidence = maxScore
-				cls["confidence"] = maxScore
-			}
-		}
 
-		log.Printf("📊 Extracted - class: '%s', confidence: %.2f", predictedClass, confidence)
-	}
+				// Извлекаем confidence по schema
+				if cf, found := extractConfidence(&agent, resultMap); found {
+					confidence = cf
+				}
 
-	// Получаем embedding если есть
-	if emb, ok := stepResults["embedding_result"].([]float64); ok {
-		embedding = emb
-	} else if embInterface, ok := stepResults["embedding_result"].(map[string]interface{}); ok {
-		if embeddings, ok := embInterface["embeddings"].([]interface{}); ok && len(embeddings) > 0 {
-			if first, ok := embeddings[0].([]interface{}); ok {
-				embedding = make([]float64, len(first))
-				for i, v := range first {
-					if val, ok := v.(float64); ok {
-						embedding[i] = val
-					}
+				// Извлекаем категорию/класс
+				if pc, ok := resultMap["predicted_class"].(string); ok {
+					predictedClass = pc
+				} else if cat, ok := resultMap["category"].(string); ok {
+					predictedClass = cat
 				}
 			}
 		}
 	}
 
-	// Получаем финальный ответ от генератора
-	if resp, ok := stepResults["generator_response"].(string); ok {
-		finalResponse = resp
-	} else if genResult, ok := stepResults["generator_result"].(map[string]interface{}); ok {
-		if resp, ok := genResult["response"].(string); ok {
-			finalResponse = resp
-		} else if text, ok := genResult["text"].(string); ok {
-			finalResponse = text
+	// Извлекаем финальный ответ из результатов генератора
+	if resp, ok := stepResults["generator_result"].(map[string]interface{}); ok {
+		if r, ok := resp["response"].(string); ok {
+			finalResponse = r
 		}
 	}
 
-	// Если не получили финальный ответ, но есть classification, генерируем простой
-	if finalResponse == "" && predictedClass != "" {
-		finalResponse = fmt.Sprintf("Ваш запрос категории '%s' принят в обработку.", predictedClass)
-		if confidence > 0 {
-			finalResponse += fmt.Sprintf(" (уверенность: %.0f%%)", confidence*100)
+	// Если не нашли ответ в generator_result, ищем в любом результате
+	if finalResponse == "" {
+		for _, result := range stepResults {
+			if resultMap, ok := result.(map[string]interface{}); ok {
+				if r, ok := resultMap["response"].(string); ok && r != "" {
+					finalResponse = r
+					break
+				}
+			}
 		}
 	}
 
@@ -233,7 +206,7 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 		threshold = th
 	}
 
-	// Принимаем решение на основе confidence
+	// Принимаем решение
 	if confidence < threshold {
 		decisionMsg := fmt.Sprintf("[Decision] Confidence (%.2f) below threshold (%.2f) - escalating", confidence, threshold)
 		log.Println(decisionMsg)
@@ -262,7 +235,6 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 	response := &ProcessTicketResponse{
 		TicketID:       uuid.New().String(),
 		Classification: classification,
-		Embedding:      embedding,
 		SuggestedTeam:  team,
 		Status:         "processed",
 		Timestamp:      time.Now().Format(time.RFC3339),
@@ -286,10 +258,6 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 		classJSON, _ := json.Marshal(classification)
 		ticket.Classification = datatypes.JSON(classJSON)
 	}
-	if response.Embedding != nil {
-		embJSON, _ := json.Marshal(response.Embedding)
-		ticket.Embedding = datatypes.JSON(embJSON)
-	}
 	if finalResponse != "" {
 		ticket.FinalResponse = &finalResponse
 	}
@@ -304,6 +272,48 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 	}
 	log.Printf("✅ Ticket processed successfully")
 	return response, nil
+}
+
+// extractConfidence извлекает confidence из ответа агента на основе Agent Card
+func extractConfidence(agent *discovery.Agent, output map[string]interface{}) (float64, bool) {
+	for _, skill := range agent.Skills {
+		// Ищем confidence_field в output_schema
+		if cf, ok := skill.OutputSchema["confidence_field"].(string); ok {
+			if val, ok := output[cf].(float64); ok {
+				return val, true
+			}
+		}
+		// Ищем поле "confidence" в properties output_schema
+		if props, ok := skill.OutputSchema["properties"].(map[string]interface{}); ok {
+			if _, hasConf := props["confidence"]; hasConf {
+				if val, ok := output["confidence"].(float64); ok {
+					return val, true
+				}
+			}
+		}
+		// Пробуем score, если confidence нет
+		if val, ok := output["confidence"].(float64); ok {
+			return val, true
+		}
+	}
+	return 0, false
+}
+
+// agentToAgentType возвращает тип агента по его capabilities
+func agentToAgentType(agent discovery.Agent) string {
+	for _, cap := range agent.Capabilities {
+		switch cap {
+		case "classification":
+			return "classifier"
+		case "embedding":
+			return "encoder"
+		case "search":
+			return "researcher"
+		case "generation":
+			return "generator"
+		}
+	}
+	return strings.ToLower(agent.Name)
 }
 
 func (s *OrchestratorService) createPlan(text string, config map[string]interface{}, agents []discovery.Agent) (string, error) {
