@@ -56,6 +56,11 @@ func (c *HybridClient) Refresh() {
 			Status:   "offline", // по умолчанию, обновим после опроса
 		}
 
+		// Устанавливаем DispatcherID
+		if dba.DispatcherID != nil {
+			agent.DispatcherID = dba.DispatcherID.String()
+		}
+
 		// Парсим capabilities
 		if dba.Capabilities != nil {
 			json.Unmarshal(dba.Capabilities, &agent.Capabilities)
@@ -152,16 +157,24 @@ func (c *HybridClient) fetchAgentCard(endpoint string) (map[string]interface{}, 
 }
 
 // GetAgents возвращает online-агентов по фильтру capabilities
+// GetAgents возвращает online-агентов по фильтру capabilities и dispatcher_id
 func (c *HybridClient) GetAgents(dispatcherID string, requiredCapabilities []string) ([]Agent, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	fmt.Printf("Getting agents with required capabilities: %v\n", requiredCapabilities)
+	fmt.Printf("Getting agents with required capabilities: %v (dispatcher: %s)\n", requiredCapabilities, dispatcherID)
 
 	var result []Agent
 
 	for _, agent := range c.agents {
 		if agent.Status != "online" {
+			continue
+		}
+
+		// Фильтр по диспетчерской:
+		// - агенты без dispatcher_id (общие) доступны всем
+		// - агенты с dispatcher_id доступны только своей диспетчерской
+		if agent.DispatcherID != "" && agent.DispatcherID != dispatcherID {
 			continue
 		}
 

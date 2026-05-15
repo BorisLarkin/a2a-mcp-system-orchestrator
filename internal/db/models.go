@@ -13,8 +13,9 @@ import (
 type Dispatcher struct {
 	ID        uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
 	Name      string         `gorm:"size:255;not null"`
-	APIKey    string         `gorm:"size:255;not null" json:"-"`
-	Config    datatypes.JSON `gorm:"type:jsonb;not null;default:'{}'::jsonb"`
+	Email     string         `gorm:"size:255;uniqueIndex"`
+	APIKey    string         `gorm:"size:255;uniqueIndex;not null"`
+	Config    datatypes.JSON `gorm:"type:jsonb;default:'{}'::jsonb"`
 	Status    string         `gorm:"size:50;default:'active'"`
 	CreatedAt time.Time
 	UpdatedAt time.Time

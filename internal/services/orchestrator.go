@@ -130,6 +130,8 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 	log.Printf("Executing plan with %d steps", len(steps))
 	executionLog = append(executionLog, fmt.Sprintf("Executing plan with %d steps", len(steps)))
 
+	configMap["_dispatcher_id"] = req.DispatcherID
+
 	executionContext, execErr := s.planExecutor.ExecutePlan(steps, req.Text, configMap)
 	if execErr != nil {
 		log.Printf("Plan execution failed: %v", execErr)
@@ -317,56 +319,47 @@ func agentToAgentType(agent discovery.Agent) string {
 }
 
 func (s *OrchestratorService) createPlan(text string, config map[string]interface{}, agents []discovery.Agent) (string, error) {
-	agentDescriptions := []string{}
+	// Формируем список агентов с их skills
+	agentLines := []string{}
 	for _, a := range agents {
-		skills := []string{}
+		skillIDs := []string{}
 		for _, sk := range a.Skills {
-			skills = append(skills, sk.ID)
+			skillIDs = append(skillIDs, sk.ID)
 		}
-		agentDescriptions = append(agentDescriptions,
-			fmt.Sprintf("- %s: capabilities: %v, skills: %v", a.Name, a.Capabilities, skills))
+		// Берём первый capability как тип агента
+		agentType := a.Capabilities[0]
+		agentLines = append(agentLines,
+			fmt.Sprintf("- %s (skills: %s)", agentType, strings.Join(skillIDs, ", ")))
 	}
-	agentsText := strings.Join(agentDescriptions, "\n")
+	agentsText := strings.Join(agentLines, "\n")
 
-	systemPrompt := `Ты — оркестратор системы поддержки. Твоя задача — спланировать обработку обращения пользователя.
+	systemPrompt := fmt.Sprintf(`Ты — оркестратор. Выбери ТОЛЬКО агентов, нужных для ответа на запрос.
 
-Доступные агенты:
+Доступные типы агентов и их навыки:
 %s
 
-ВАЖНО: Твой ответ должен быть ТОЛЬКО списком шагов в формате:
-"X. агент:навык → действие"
+ПРАВИЛА:
+1. Каждый шаг НАЧИНАЕТСЯ С НОМЕРА: "1. ", "2. ", "3. "
+2. ПОСЛЕДНИМ шагом ВСЕГДА generator:generate_response → answer
+3. НЕ вызывай одного агента больше одного раза
+4. НЕ пиши ничего кроме шагов
 
-ПРИМЕРЫ ПРАВИЛЬНЫХ ОТВЕТОВ:
-1. classifier:classify → problem_type
-2. researcher:search → solutions
-3. generator:generate_response → answer
+ФОРМАТ (строго):
+1. тип:навык → результат
+2. тип:навык → результат
 
+ПРИМЕР для "какие тарифы":
+1. corporate:company_info → info
+2. generator:generate_response → answer
+
+ПРИМЕР для "не работает интернет":
 1. classifier:classify → category
-2. encoder:embed → embedding
-3. generator:generate_response → response
+2. researcher:search → solutions
+3. generator:generate_response → answer`, agentsText)
 
-ЗАПРЕЩЕНО:
-- Использовать if/else
-- Писать объяснения
-- Добавлять скобки или специальные символы
-- Менять формат "номер. агент:навык → действие"
-- Писать агента без навыка (например "1. classifier → category" — НЕЛЬЗЯ)
+	userPrompt := fmt.Sprintf(`Запрос: "%s"
 
-Правила выбора агентов:
-- classifier:classify - для определения категории проблемы
-- encoder:embed - для создания эмбеддингов (если нужен поиск)
-- researcher:search - для поиска решений в базе знаний
-- generator:generate_response - для генерации финального ответа
-
-Для финального ответа ВСЕГДА используй generator:generate_response.
-
-Составь план из 2-3 шагов. Только формат "X. агент:навык → действие", ничего лишнего.`
-
-	systemPrompt = fmt.Sprintf(systemPrompt, agentsText)
-
-	userPrompt := fmt.Sprintf(`Обращение пользователя: "%s"
-
-Составь план обработки.`, text)
+План:`, text)
 
 	return s.llmClient.Generate(systemPrompt, userPrompt)
 }

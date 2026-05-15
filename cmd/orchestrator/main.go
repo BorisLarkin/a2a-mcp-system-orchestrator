@@ -2,15 +2,18 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"orchestrator/internal/config"
 	"orchestrator/internal/db"
 	"orchestrator/internal/discovery"
 	"orchestrator/internal/handlers"
 	"orchestrator/internal/services"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 func main() {
@@ -46,26 +49,7 @@ func main() {
 		gormDB.Model(&db.Dispatcher{}).Count(&count)
 
 		if count == 0 {
-			log.Println("No dispatchers found, creating test record...")
-
-			// Создаём тестовую диспетчерскую
-			testDispatcher := &db.Dispatcher{
-				Name:   "Test Company",
-				APIKey: "test-api-key-123",
-				Config: datatypes.JSON([]byte(`{
-	                "communication_style": "friendly",
-	                "confidence_threshold": 0.7,
-	                "enable_internet_search": true,
-	                "company_context": "Тестовая компания для разработки"
-	            }`)),
-				Status: "active",
-			}
-
-			if err := gormDB.Create(testDispatcher).Error; err != nil {
-				log.Printf("Warning: Could not create test dispatcher: %v", err)
-			} else {
-				log.Printf("Created test(init) dispatcher with ID: %s", testDispatcher.ID)
-			}
+			log.Println("No dispatchers found, skipping...")
 		}
 		// Проверяем и создаём seed-агентов
 		var agentCount int64
@@ -181,8 +165,62 @@ func main() {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
+	// API для управления агентами (защищён API-ключом диспетчерской)
+	agentGroup := r.Group("/api/v1/agents")
+	agentGroup.Use(apiKeyAuthMiddleware(gormDB))
+	{
+		agentHandler := handlers.NewAgentHandler(gormDB, discoveryClient)
+		agentGroup.POST("", agentHandler.RegisterAgent)
+		agentGroup.GET("", agentHandler.ListAgents)
+		agentGroup.DELETE("/:id", agentHandler.DeleteAgent)
+	}
+
+	// SaaS Admin middleware (для регистрации диспетчерских)
+	saasAdminKey := os.Getenv("SAAS_ADMIN_KEY")
+	if saasAdminKey == "" {
+		saasAdminKey = "super_secret_admin_key" // fallback для dev
+	}
+	dispatcherHandler := handlers.NewDispatcherHandler(gormDB)
+	saasAdminGroup := r.Group("/api/v1/admin/dispatchers")
+	saasAdminGroup.Use(func(c *gin.Context) {
+		key := c.GetHeader("X-Admin-Key")
+		if key != saasAdminKey {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid admin key"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	})
+	{
+		saasAdminGroup.POST("", dispatcherHandler.Register)
+		saasAdminGroup.GET("", dispatcherHandler.List)
+	}
+
+	// Публичный эндпоинт для валидации ключа (используется клиентом при подключении)
+	r.POST("/api/v1/dispatchers/validate", dispatcherHandler.ValidateAPIKey)
+
 	log.Printf("Starting orchestrator on :8080")
 	if err := r.Run(":8080"); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func apiKeyAuthMiddleware(database *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		apiKey := c.GetHeader("X-API-Key")
+		if apiKey == "" {
+			c.JSON(401, gin.H{"error": "X-API-Key required"})
+			c.Abort()
+			return
+		}
+		// Ищем диспетчерскую по API-ключу
+		var dispatcher db.Dispatcher
+		if err := database.Where("api_key = ?", apiKey).First(&dispatcher).Error; err != nil {
+			c.JSON(401, gin.H{"error": "Invalid API key"})
+			c.Abort()
+			return
+		}
+		c.Set("dispatcher_id", dispatcher.ID)
+		c.Next()
 	}
 }

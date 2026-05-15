@@ -1,8 +1,23 @@
 -- ============================================================
--- Миграция 002: Полная схема БД
+-- Миграция 001: Полная схема БД
 -- Таблицы: agents, agent_registrations, tickets, a2a_calls,
 --          knowledge_base (заготовка), dispatcher_configs
 -- ============================================================
+
+-- 0. Диспетчерские
+CREATE TABLE IF NOT EXISTS dispatchers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL,
+    api_key VARCHAR(255) NOT NULL,
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status VARCHAR(50) DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    deleted_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE UNIQUE INDEX idx_dispatchers_api_key ON dispatchers(api_key);
+CREATE INDEX idx_dispatchers_status ON dispatchers(status);
 
 -- 1. Агенты
 CREATE TABLE IF NOT EXISTS agents (
@@ -86,7 +101,7 @@ CREATE INDEX idx_a2a_ticket ON a2a_calls(ticket_id);
 CREATE INDEX idx_a2a_agent ON a2a_calls(agent_id);
 CREATE INDEX idx_a2a_time ON a2a_calls(created_at DESC);
 
--- 5. Заготовка базы знаний (для будущего RAG)
+-- 5. Заготовка базы знаний (для RAG)
 CREATE TABLE IF NOT EXISTS knowledge_base (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     dispatcher_id UUID REFERENCES dispatchers(id) ON DELETE CASCADE,
@@ -125,7 +140,7 @@ CREATE INDEX idx_dc_version ON dispatcher_configs(dispatcher_id, version DESC);
 -- ============================================================
 INSERT INTO agents (name, endpoint, agent_type, capabilities, skills, status, metadata) VALUES
 (
-    'rubert-classifier',
+    'classifier',
     'http://100.87.189.74:9001',
     'classifier',
     '["classification"]'::jsonb,
@@ -137,15 +152,6 @@ INSERT INTO agents (name, endpoint, agent_type, capabilities, skills, status, me
     '{"model": "rubert-tiny2"}'::jsonb
 ),
 (
-    'sentence-encoder',
-    'http://100.87.189.74:9102',
-    'encoder',
-    '["embedding"]'::jsonb,
-    '[{"id": "embed", "description": "Create vector embeddings from texts"}]'::jsonb,
-    'online',
-    '{"model": "paraphrase-multilingual-MiniLM-L12-v2"}'::jsonb
-),
-(
     'llm-generator',
     'http://100.87.189.74:9003',
     'generator',
@@ -155,7 +161,7 @@ INSERT INTO agents (name, endpoint, agent_type, capabilities, skills, status, me
         {"id": "format_response", "description": "Format and adjust tone of existing answer"}
     ]'::jsonb,
     'online',
-    '{"model": "llama3.2"}'::jsonb
+    '{"model": "saiga-llama"}'::jsonb
 ),
 (
     'researcher',

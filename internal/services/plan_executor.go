@@ -12,6 +12,7 @@ type PlanExecutor struct {
 	agentClient     *AgentClient
 	a2aClient       *A2AClient
 	llmClient       *LLMClient
+	dispatcherID    string
 }
 
 type PlanStep struct {
@@ -35,7 +36,7 @@ func (e *PlanExecutor) ParsePlan(planText string) ([]PlanStep, error) {
 	planText = strings.TrimSpace(planText)
 	lines := strings.Split(planText, "\n")
 
-	stepRegexWithSkill := regexp.MustCompile(`(?i)^\s*(\d+)[.)]\s*(\w+):(\w+)\s*[→-]>?\s*(.+)`)
+	stepRegexWithSkill := regexp.MustCompile(`(?i)^\s*(\d+)[.)]\s*([\w-]+):(\w+)\s*[→-]>?\s*(.+)`)
 	stepRegexSimple := regexp.MustCompile(`(?i)^\s*(\d+)[.)]\s*(\w+)\s*[→-]>?\s*(.+)`)
 
 	for _, line := range lines {
@@ -69,10 +70,21 @@ func (e *PlanExecutor) ParsePlan(planText string) ([]PlanStep, error) {
 		} else {
 			fmt.Printf("Skipping unparseable line: %s\n", line)
 		}
-	}
-
-	if len(steps) == 0 {
-		return nil, fmt.Errorf("no valid steps found in plan")
+		// Если ни один шаг не распознан, пробуем парсить без номеров
+		if len(steps) == 0 {
+			simpleLine := strings.TrimSpace(planText)
+			// Пробуем формат "тип:навык → действие"
+			noNumberRegex := regexp.MustCompile(`(?i)^\s*([\w-]+):(\w+)\s*[→-]>?\s*(.+)`)
+			matches := noNumberRegex.FindStringSubmatch(simpleLine)
+			if len(matches) == 4 {
+				steps = append(steps, PlanStep{
+					AgentType: strings.ToLower(matches[1]),
+					SkillID:   strings.ToLower(matches[2]),
+					Action:    strings.TrimSpace(matches[3]),
+				})
+				fmt.Printf("Parsed step (no number): %s:%s → %s\n", matches[1], matches[2], strings.TrimSpace(matches[3]))
+			}
+		}
 	}
 
 	return steps, nil
@@ -93,6 +105,11 @@ func getDefaultSkillID(agentType, action string) string {
 
 // ExecutePlan выполняет последовательность шагов
 func (e *PlanExecutor) ExecutePlan(steps []PlanStep, initialText string, config map[string]interface{}) (map[string]interface{}, error) {
+	// Получаем dispatcherID из контекста, если есть
+	if dispID, ok := config["_dispatcher_id"].(string); ok {
+		e.dispatcherID = dispID
+	}
+
 	// Контекст выполнения — накапливает результаты всех шагов
 	context := map[string]interface{}{
 		"original_text": initialText,
@@ -263,41 +280,49 @@ func (e *PlanExecutor) fallbackCall(agent *discovery.Agent, step PlanStep, conte
 }
 
 func (e *PlanExecutor) findAgentByType(agentType string) (*discovery.Agent, error) {
-	capabilityMap := map[string]string{
-		"classifier": "classification",
-		"encoder":    "embedding",
-		"researcher": "search",
-		"generator":  "generation",
-	}
+	fmt.Printf("🔍 findAgentByType: looking for '%s'\n", agentType)
 
-	capability, ok := capabilityMap[agentType]
-	if !ok {
-		return nil, fmt.Errorf("unknown agent type: %s", agentType)
-	}
+	fmt.Printf("🔍 findAgentByType: looking for '%s' (disp=%s)\n", agentType, e.dispatcherID)
 
-	agents, err := e.discoveryClient.GetAgents("", []string{capability})
+	agents, err := e.discoveryClient.GetAgents(e.dispatcherID, []string{})
+
 	if err != nil {
 		return nil, fmt.Errorf("error getting agents: %w", err)
 	}
 
-	if len(agents) == 0 {
-		return nil, fmt.Errorf("no agent found for capability: %s", capability)
+	fmt.Printf("Available agents: %d\n", len(agents))
+	for _, a := range agents {
+		fmt.Printf("  - %s (caps: %v)\n", a.Name, a.Capabilities)
 	}
 
-	// Выбираем подходящего агента по имени
-	var selected *discovery.Agent
+	// 1. Точное совпадение имени
 	for i, a := range agents {
-		if strings.Contains(strings.ToLower(a.Name), strings.ToLower(agentType)) {
-			selected = &agents[i]
-			break
+		if strings.EqualFold(a.Name, agentType) {
+			fmt.Printf("✅ Found by name: %s\n", a.Name)
+			return &agents[i], nil
 		}
 	}
-	if selected == nil {
-		selected = &agents[0]
+
+	// 2. По capabilities
+	for i, a := range agents {
+		for _, cap := range a.Capabilities {
+			if strings.EqualFold(cap, agentType) {
+				fmt.Printf("✅ Found by capability: %s has cap '%s'\n", a.Name, cap)
+				return &agents[i], nil
+			}
+		}
 	}
 
-	fmt.Printf("✅ Selected agent for %s: %s at %s\n", agentType, selected.Name, selected.Endpoint)
-	return selected, nil
+	// 3. Частичное совпадение
+	for i, a := range agents {
+		if strings.Contains(strings.ToLower(a.Name), strings.ToLower(agentType)) {
+			fmt.Printf("✅ Found by partial name: %s contains '%s'\n", a.Name, agentType)
+			return &agents[i], nil
+		}
+	}
+
+	fmt.Printf("❌ No agent found for: %s\n", agentType)
+	return nil, fmt.Errorf("no agent found for type: %s", agentType)
 }
 
 func getKeys(m map[string]interface{}) []string {

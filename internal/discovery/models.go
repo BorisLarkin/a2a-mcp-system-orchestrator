@@ -15,6 +15,7 @@ type Agent struct {
 	Endpoint     string                 `json:"endpoint"`
 	Capabilities []string               `json:"capabilities"`
 	Status       string                 `json:"status"`
+	DispatcherID string                 `json:"dispatcher_id,omitempty"` // ← добавить
 	Skills       []Skill                `json:"skills,omitempty"`
 	Metadata     map[string]interface{} `json:"metadata"`
 }

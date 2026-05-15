@@ -19,7 +19,7 @@ type Config struct {
 	StaticAgents             string `env:"STATIC_AGENTS_FILE" envDefault:"app/config/agents.json"`
 	LogLevel                 string `env:"LOG_LEVEL" envDefault:"info"`
 	LLMEndpoint              string `env:"LLM_ENDPOINT" envDefault:"http://ollama:11434/api/chat"`
-	LLMModel                 string `env:"LLM_MODEL" envDefault:"phi3:mini"`
+	LLMModel                 string `env:"LLM_MODEL" envDefault:"qwen3.5:9b"`
 }
 
 func Load() (*Config, error) {

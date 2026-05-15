@@ -19,14 +19,14 @@ done
 echo 'Ollama is ready!'
 
 # Проверяем наличие модели llama3.2
-echo 'Checking if llama3.2 model exists...'
-MODEL_EXISTS=$(curl -s http://ollama:11434/api/tags | grep -c '"name":"llama3.2:latest"')
+echo 'Checking if llama3 model exists...'
+MODEL_EXISTS=$(curl -s http://ollama:11434/api/tags | grep -c '"name":"ilyagusev/saiga_llama3:latest"')
 
 if [ "$MODEL_EXISTS" -eq "0" ]; then
     echo 'Model llama3.2 not found. Pulling model...'
     curl -X POST http://ollama:11434/api/pull \
         -H 'Content-Type: application/json' \
-        -d '{"name": "llama3.2"}'
+        -d '{"name": "ilyagusev/saiga_llama3:latest"}'
     
     # Проверяем успешность загрузки
     if [ $? -eq 0 ]; then
@@ -36,13 +36,13 @@ if [ "$MODEL_EXISTS" -eq "0" ]; then
         exit 1
     fi
 else
-    echo 'Model llama3.2 already exists!'
+    echo 'Model llama3 already exists!'
 fi
 
-echo 'Pre-warming llama3.2 model...'
+echo 'Pre-warming llama3 model...'
 curl -X POST http://ollama:11434/api/generate \
     -H 'Content-Type: application/json' \
-    -d '{"model": "llama3.2", "prompt": "Hello", "keep_alive": -1}'
+    -d '{"model": "ilyagusev/saiga_llama3", "prompt": "Hello", "keep_alive": -1}'
 
 if [ $? -eq 0 ]; then
     echo 'Model pre-warmed successfully!'
