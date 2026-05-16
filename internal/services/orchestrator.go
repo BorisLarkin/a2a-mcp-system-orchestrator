@@ -140,7 +140,6 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 	}
 
 	// Сохраняем результаты шагов для ответа
-	// Сохраняем результаты шагов для ответа
 	if ctx, ok := executionContext["step_results"].(map[string]interface{}); ok {
 		stepResults = ctx
 	}
@@ -158,42 +157,55 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 	var confidence float64
 	var predictedClass string
 
-	// Ищем confidence в результатах всех шагов, используя Agent Card'ы
-	for _, agent := range allAgents {
-		agentType := agentToAgentType(agent)
-		if result, ok := stepResults[agentType+"_result"]; ok {
-			if resultMap, ok := result.(map[string]interface{}); ok {
-				// Копируем результат классификатора как classification
-				if agentType == "classifier" {
-					classification = resultMap
+	// Ищем confidence в результатах всех шагов
+	for key, value := range stepResults {
+		if resultMap, ok := value.(map[string]interface{}); ok {
+			// Проверяем, содержит ли ключ "classifier" или "llm-classifier"
+			if strings.Contains(strings.ToLower(key), "classifier") {
+				// Извлекаем confidence напрямую из результата
+				if conf, ok := resultMap["confidence"].(float64); ok {
+					confidence = conf
 				}
-
-				// Извлекаем confidence по schema
-				if cf, found := extractConfidence(&agent, resultMap); found {
-					confidence = cf
-				}
-
-				// Извлекаем категорию/класс
 				if pc, ok := resultMap["predicted_class"].(string); ok {
 					predictedClass = pc
 				} else if cat, ok := resultMap["category"].(string); ok {
 					predictedClass = cat
 				}
+				if classification == nil {
+					classification = resultMap
+				}
 			}
 		}
 	}
-
-	// Извлекаем финальный ответ из результатов генератора
-	if resp, ok := stepResults["generator_result"].(map[string]interface{}); ok {
-		if r, ok := resp["response"].(string); ok {
-			finalResponse = r
+	// Если классификатор не вызывался — считаем confidence = 1.0
+	if confidence == 0 {
+		classifierCalled := false
+		for key := range stepResults {
+			if strings.Contains(strings.ToLower(key), "classifier") {
+				classifierCalled = true
+				break
+			}
+		}
+		if !classifierCalled {
+			confidence = 1.0
 		}
 	}
 
-	// Если не нашли ответ в generator_result, ищем в любом результате
+	// После выполнения всех шагов — извлекаем ответ
+	for key, value := range stepResults {
+		if resultMap, ok := value.(map[string]interface{}); ok {
+			if strings.Contains(strings.ToLower(key), "generator") {
+				if r, ok := resultMap["response"].(string); ok && r != "" {
+					finalResponse = r
+					break
+				}
+			}
+		}
+	}
+	// Если не нашли — ищем в любом результате
 	if finalResponse == "" {
-		for _, result := range stepResults {
-			if resultMap, ok := result.(map[string]interface{}); ok {
+		for _, value := range stepResults {
+			if resultMap, ok := value.(map[string]interface{}); ok {
 				if r, ok := resultMap["response"].(string); ok && r != "" {
 					finalResponse = r
 					break
@@ -225,15 +237,33 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 	// Определяем команду
 	team := s.resolveTeam(predictedClass, configMap)
 
-	// Добавляем метаданные в classification
-	if classification != nil {
-		classification["threshold_met"] = confidence >= threshold
-		classification["used_threshold"] = threshold
-		if finalResponse != "" {
-			classification["generated_response"] = finalResponse
+	// Если ответ пустой — заглушка
+	if finalResponse == "" {
+		finalResponse = "Спасибо за обращение! Мы получили ваш запрос и скоро ответим."
+	}
+
+	// Всегда создаём classification
+	if classification == nil {
+		classification = make(map[string]interface{})
+	}
+
+	// Если есть результат классификатора — копируем его поля
+	for key, value := range stepResults {
+		if strings.Contains(strings.ToLower(key), "classifier") {
+			if resultMap, ok := value.(map[string]interface{}); ok {
+				for k, v := range resultMap {
+					classification[k] = v
+				}
+			}
 		}
 	}
 
+	classification["generated_response"] = finalResponse
+	classification["predicted_class"] = predictedClass
+	classification["threshold_met"] = confidence >= threshold
+	classification["used_threshold"] = threshold
+
+	// Создаём response
 	response := &ProcessTicketResponse{
 		TicketID:       uuid.New().String(),
 		Classification: classification,
@@ -244,34 +274,33 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 		ExecutionLog:   executionLog,
 	}
 
+	// Сохраняем в БД
 	ticketID, _ := uuid.Parse(response.TicketID)
 	dispID, _ := uuid.Parse(req.DispatcherID)
 	ticket := &db.Ticket{
-		ID:               ticketID,
-		DispatcherID:     &dispID,
-		Text:             req.Text,
-		Status:           response.Status,
-		Plan:             &response.Plan,
-		Confidence:       &confidence,
-		SuggestedTeam:    &team,
-		ProcessingTimeMs: nil,
+		ID:            ticketID,
+		DispatcherID:  &dispID,
+		Text:          req.Text,
+		Status:        response.Status,
+		Plan:          &response.Plan,
+		Confidence:    &confidence,
+		SuggestedTeam: &team,
+		FinalResponse: &finalResponse,
 	}
-	if classification != nil {
-		classJSON, _ := json.Marshal(classification)
-		ticket.Classification = datatypes.JSON(classJSON)
-	}
-	if finalResponse != "" {
-		ticket.FinalResponse = &finalResponse
-	}
+	classJSON, _ := json.Marshal(classification)
+	ticket.Classification = datatypes.JSON(classJSON)
+
 	if len(executionLog) > 0 {
 		logJSON, _ := json.Marshal(executionLog)
 		ticket.ExecutionLog = datatypes.JSON(logJSON)
 	}
+
 	if err := s.ticketRepo.Create(ticket); err != nil {
 		log.Printf("Warning: failed to save ticket: %v", err)
 	} else {
 		log.Printf("Ticket saved: %s", ticket.ID)
 	}
+
 	log.Printf("✅ Ticket processed successfully")
 	return response, nil
 }
@@ -303,6 +332,7 @@ func extractConfidence(agent *discovery.Agent, output map[string]interface{}) (f
 
 // agentToAgentType возвращает тип агента по его capabilities
 func agentToAgentType(agent discovery.Agent) string {
+	// Проверяем capabilities
 	for _, cap := range agent.Capabilities {
 		switch cap {
 		case "classification":
@@ -315,7 +345,18 @@ func agentToAgentType(agent discovery.Agent) string {
 			return "generator"
 		}
 	}
-	return strings.ToLower(agent.Name)
+	// Fallback: берём первую часть имени до дефиса
+	name := strings.ToLower(agent.Name)
+	if strings.Contains(name, "classifier") {
+		return "classifier"
+	}
+	if strings.Contains(name, "generator") {
+		return "generator"
+	}
+	if strings.Contains(name, "researcher") {
+		return "researcher"
+	}
+	return name
 }
 
 func (s *OrchestratorService) createPlan(text string, config map[string]interface{}, agents []discovery.Agent) (string, error) {
@@ -333,31 +374,27 @@ func (s *OrchestratorService) createPlan(text string, config map[string]interfac
 	}
 	agentsText := strings.Join(agentLines, "\n")
 
-	systemPrompt := fmt.Sprintf(`Ты — оркестратор. Выбери ТОЛЬКО агентов, нужных для ответа на запрос.
+	systemPrompt := fmt.Sprintf(`Ты — оркестратор. Составь план из 2-3 и более шагов.
 
-Доступные типы агентов и их навыки:
+Доступные агенты (используй ИМЕНА агентов, как указано):
 %s
 
+ФОРМАТ ОТВЕТА — СТРОГО ТАК:
+1. имя_агента:навык → результат
+2. имя_агента:навык → результат
+
+ПРИМЕР для запроса "не работает интернет":
+1. llm-classifier-agent:classify → category
+2. researcher-v2:search → solutions
+3. generator-v1:generate_response → answer
+
 ПРАВИЛА:
-1. Каждый шаг НАЧИНАЕТСЯ С НОМЕРА: "1. ", "2. ", "3. "
-2. ПОСЛЕДНИМ шагом ВСЕГДА generator:generate_response → answer
-3. НЕ вызывай одного агента больше одного раза
-4. НЕ пиши ничего кроме шагов
+- Используй имя агента ТОЧНО как в списке
+- Последним шагом ВСЕГДА generator-v1:generate_response → answer
+- Пиши ТОЛЬКО шаги, ничего больше
+- Не добавляй скобки, пояснения, варианты`, agentsText)
 
-ФОРМАТ (строго):
-1. тип:навык → результат
-2. тип:навык → результат
-
-ПРИМЕР для "какие тарифы":
-1. corporate:company_info → info
-2. generator:generate_response → answer
-
-ПРИМЕР для "не работает интернет":
-1. classifier:classify → category
-2. researcher:search → solutions
-3. generator:generate_response → answer`, agentsText)
-
-	userPrompt := fmt.Sprintf(`Запрос: "%s"
+	userPrompt := fmt.Sprintf(`Запрос пользователя: "%s"
 
 План:`, text)
 

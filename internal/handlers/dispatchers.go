@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -120,4 +121,18 @@ func (h *DispatcherHandler) GetByID(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"dispatcher": dispatcher})
+}
+
+func (h *DispatcherHandler) UpdateConfig(c *gin.Context) {
+	id := c.Param("id")
+	var req map[string]interface{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	configJSON, _ := json.Marshal(req)
+	h.db.Model(&db.Dispatcher{}).Where("id = ?", id).Update("config", datatypes.JSON(configJSON))
+
+	c.JSON(200, gin.H{"message": "Config updated"})
 }

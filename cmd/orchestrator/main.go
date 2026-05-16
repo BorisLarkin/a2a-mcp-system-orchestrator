@@ -175,6 +175,21 @@ func main() {
 		agentGroup.DELETE("/:id", agentHandler.DeleteAgent)
 	}
 
+	apiGroup := r.Group("/api/v1")
+	apiGroup.Use(apiKeyAuthMiddleware(gormDB))
+	{
+		encoderURL := os.Getenv("ENCODER_MCP_URL")
+		if encoderURL == "" {
+			encoderURL = "http://100.87.189.74:9102"
+		}
+		qdrantURL := os.Getenv("QDRANT_MCP_URL")
+		if qdrantURL == "" {
+			qdrantURL = "http://100.87.189.74:9103"
+		}
+		knowledgeHandler := handlers.NewKnowledgeHandler(encoderURL, qdrantURL)
+		apiGroup.POST("/knowledge", knowledgeHandler.AddDocument)
+	}
+
 	// SaaS Admin middleware (для регистрации диспетчерских)
 	saasAdminKey := os.Getenv("SAAS_ADMIN_KEY")
 	if saasAdminKey == "" {
@@ -194,6 +209,12 @@ func main() {
 	{
 		saasAdminGroup.POST("", dispatcherHandler.Register)
 		saasAdminGroup.GET("", dispatcherHandler.List)
+	}
+
+	dispatcherGroup := r.Group("/api/v1/dispatchers")
+	dispatcherGroup.Use(apiKeyAuthMiddleware(gormDB))
+	{
+		dispatcherGroup.PUT("/:id/config", dispatcherHandler.UpdateConfig)
 	}
 
 	// Публичный эндпоинт для валидации ключа (используется клиентом при подключении)
