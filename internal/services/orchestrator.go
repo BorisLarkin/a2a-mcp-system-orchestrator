@@ -254,6 +254,14 @@ func (s *OrchestratorService) Process(ctx context.Context, req *ProcessTicketReq
 				for k, v := range resultMap {
 					classification[k] = v
 				}
+				// ЯВНО извлекаем predicted_class и category
+				if pc, ok := resultMap["predicted_class"].(string); ok && pc != "" {
+					predictedClass = pc
+					classification["predicted_class"] = pc
+				} else if cat, ok := resultMap["category"].(string); ok && cat != "" {
+					predictedClass = cat
+					classification["predicted_class"] = cat
+				}
 			}
 		}
 	}
